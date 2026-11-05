@@ -1,0 +1,164 @@
+name: Comment on the pull request
+
+permissions:
+  contents: read
+
+on:
+  workflow_run:
+    workflows:
+      - Publish
+    types:
+      - completed
+
+jobs:
+  upload:
+    permissions:
+      pull-requests: write
+    runs-on: ubuntu-latest
+    if: >
+      github.event.workflow_run.event == 'pull_request'
+    continue-on-error: true
+    steps:
+      - name: Dump trigger info
+        run: |
+          echo "trigger_name=${{ github.event.workflow_run.name }}"
+          echo "trigger_run_id=${{ github.event.workflow_run.id }}"
+          echo "trigger_event=${{ github.event.workflow_run.event }}"
+          echo "prs=${{ toJSON(github.event.workflow_run.pull_requests) }}"
+          echo "head_sha=${{ github.event.workflow_run.head_sha }}"
+          echo "head_repo=${{ github.event.workflow_run.head_repository.full_name }}"
+          ls -la
+
+      - name: 'Download artifact'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          script: |
+            var artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: ${{ github.event.workflow_run.id }},
+            });
+            var matchArtifact = artifacts.data.artifacts.filter((artifact) => {
+              return artifact.name == "output"
+            })[0];
+            var download = await github.rest.actions.downloadArtifact({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              artifact_id: matchArtifact.id,
+              archive_format: 'zip',
+            });
+            var fs = require('fs');
+            fs.writeFileSync('${{ github.workspace }}/comment.zip', Buffer.from(download.data));
+      - run: unzip comment.zip
+
+      - name: 'Print the comment'
+        run: |
+          if [ -f "./comment.md" ]; then
+            cat ./comment.md
+          fi
+
+
+      - name: 'Comment on PR'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            var fs = require('fs');
+
+            const prs = context.payload.workflow_run ? context.payload.workflow_run.pull_requests : [];
+            let issue_number = prs.length > 0 ? prs[0].number : (context.issue ? context.issue.number : null);
+
+            if (!issue_number && context.payload.workflow_run && context.payload.workflow_run.head_sha) {
+              const prList = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: context.payload.workflow_run.head_sha,
+              });
+              const pr = prList.data.find(p => p.state === 'open') || prList.data[0];
+              if (pr) {
+                issue_number = pr.number;
+              }
+            }
+
+            if (!issue_number) {
+              console.log('No PR number found in context. Aborting.');
+              return;
+            }
+
+            if (fs.existsSync('./issueNumber')) {
+              const artifactIssue = Number(fs.readFileSync('./issueNumber', 'utf8').trim());
+              if (artifactIssue !== issue_number) {
+                console.log(`Artifact issueNumber (${artifactIssue}) does not match PR #${issue_number}. Aborting.`);
+                return;
+              }
+            }
+
+            if (fs.existsSync('./commentId')) {
+              const comment_number = Number(fs.readFileSync('./commentId', 'utf8').trim());
+              const comment = await github.rest.issues.getComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: comment_number,
+              });
+              const commentIssueNumber = Number(comment.data.issue_url.split('/').pop());
+              if (commentIssueNumber !== issue_number) {
+                console.log(`Comment ID ${comment_number} belongs to PR #${commentIssueNumber}, not PR #${issue_number}. Aborting.`);
+                return;
+              }
+              if (comment.data.user && comment.data.user.login !== 'github-actions[bot]') {
+                console.log(`Comment ID ${comment_number} was authored by ${comment.data.user.login}, not github-actions[bot]. Aborting.`);
+                return;
+              }
+            }
+
+            if (fs.existsSync('./comment.md')) {
+              var markdown = fs.readFileSync('./comment.md', 'utf8');
+              var firstLine = markdown.split('\n')[0];
+              
+              if (fs.existsSync('./commentId')) {
+                var comment_number = Number(fs.readFileSync('./commentId', 'utf8'));
+            
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: comment_number,
+                  body: markdown
+                });
+              } else {
+                const comments = await github.rest.issues.listComments({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue_number,
+                });
+                
+                // Fallback: Search for an existing comment with the same header.
+                const existingComment = comments.data.find(c => 
+                  c.user.login === 'github-actions[bot]' && 
+                  c.body.startsWith(firstLine)
+                );
+                
+                if (existingComment) {
+                  await github.rest.issues.updateComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    comment_id: existingComment.id,
+                    body: markdown
+                  });
+                } else {
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue_number,
+                    body: markdown
+                  });
+                }
+              }
+            } else if (fs.existsSync('./commentId')) {
+              var comment_number = Number(fs.readFileSync('./commentId', 'utf8'));
+            
+              await github.rest.issues.deleteComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: comment_number,
+              });
+            }
